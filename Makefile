@@ -1,4 +1,4 @@
-CCFLAGS = -O3
+CCFLAGS = -O3 -lm
 TARGET = WindowMetrics
 
 #

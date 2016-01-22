@@ -84,7 +84,7 @@ void initializePopulation(void);
 void makeOffspring(int momi, int dadi, short int *offspringGTpt);
 void migration(int *demeIndexes);
 void openDataRecordingFiles(void);
-int pickParent( int prevChosen, int nInDeme );
+int pickParent(double *selectionCoefficients, int prevChosen, int nInDeme );
 long int Poisson(double mm);
 void reproduction(int *demeIndexes);
 void RNGsetup(void);
@@ -390,7 +390,7 @@ if (initializer = 0){
      initializer++;
 }
 }
-
+}
 void calculateMetricsAndStats(void)
 {
     int i, j, k, locus, n, deme, alleleSum, numVariableInWindow;
@@ -1281,4 +1281,4 @@ int i=0;
 	}
 	return dum;
 }
-}
+
