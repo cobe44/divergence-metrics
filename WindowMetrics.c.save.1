@@ -15,8 +15,6 @@ const char *version = "1.0.3";
 #include <time.h>
 #include <sys/time.h>
 #include <string.h>
-#include <gsl/gsl_math.h>
-#include <gsl/gsl_statistics.h>
 
 #include "MT/dSFMT.h"
 
@@ -50,10 +48,7 @@ dsfmt_t dsfmt;
 #define LOW_RECOMB_PROB_PER_KB_DEFAULT 0.0001
 #define INITIAL_CONDITION_DEFAULT 0 // for setting up alleles and frequencies in initialization
 #define TS_SAMP_FREQ 1000
-#define CUTOFF_DEFAULT 0.2
-#define SITE_TYPE_BENEFICIAL_DEFAULT 1
-#define SITE_TYPE_BG_DEFAULT 2
-#define SITE_TYPE_DIVERGENT_DEFAULT 3
+#define CUTOFF_DEFAULT 0.3
 
 
 // useful flags
@@ -82,26 +77,22 @@ dsfmt_t dsfmt;
 // function declarations
 short int addAnewMutation(int locus, short int parentalAllele);
 double boxMuller(double mu, double sd);
-void buildFitnessArray();
+void buildFitnessArray(int *demeIndexesStart, int deme, int numInDeme );
 void calculateMetricsAndStats(void);
 void finalPrints(void);
 void initializePopulation(void);
 void makeOffspring(int momi, int dadi, short int *offspringGTpt);
 void migration(int *demeIndexes);
 void openDataRecordingFiles(void);
-int pickParent(double *selectionCoefficients, int prevChosen, int numAliveHere, int* aliveOnes);
+int pickParent(double *selectionCoefficients, int prevChosen, int nInDeme );
 long int Poisson(double mm);
 void reproduction(int *demeIndexes);
 void RNGsetup(void);
 void usage(char *s);
 void useShortTestValuesOfParameters(void);
 int compare(const void *p, const void *q);
-double Cutoff(double* viabilityArray, int n);
+double Cutoff(double* viabilityArray);
 double* walker(double* dum, int index);
-int viabilitySelection(int *aliveOnes, int n, double *selectionCoefficients, short int *sipt, int deme);
-double divCoeff(int locus, int deme, int genotype);
-double Selection(double* selectionCoefficients, int locus, int deme, int genotype);
-
 
 // global variables for command line options
 int TOTAL_N = TOTAL_N_DEFAULT;
@@ -127,21 +118,19 @@ int INITIAL_CONDITION = INITIAL_CONDITION_DEFAULT;
 int MODEL_TYPE = MODEL_TYPE_NEUTRAL_ONLY;
 int MONITOR_PROGRESS = 0;
 double CUTOFF = CUTOFF_DEFAULT;
-double SITE_TYPE_BENEFICIAL = SITE_TYPE_BENEFICIAL_DEFAULT;
-double SITE_TYPE_BG = SITE_TYPE_BG_DEFAULT;
-double SITE_TYPE_DIVERGENT = SITE_TYPE_DIVERGENT_DEFAULT;
 
 // other global variables
 int demeCounts[nDEMES];
 int totalSitesInGenome;
-int *siteTypes;
+int nInDeme;
 FILE *alleleFrequenciesOverTime, *mutationLog, *fixationLog, *piOverTime;
 FILE *DaOverTime, *DxyOverTime, *variableLociOverTime, *FSToverTime;
 long int t = 0;
-int initializer;
+int initializer=0, cinitializer=0;
 double* selectionCoefficients;
+int cutoff;
 
-// global pointers for m/alloc() calls
+// global pointers for malloc() calls
 double *genomeMap;
 short int *genotypes;
 int *isVariableSite;
@@ -160,21 +149,12 @@ int main(int argc, char *argv[])
 {
     int ch;
     char *progname = argv[0];
-
+    
     // read in optional command line arguments
     while ((ch = getopt(argc, argv, "A:C:D:I:L:m:M:N:p:P:q:r:R:s:S:t:T:u:U:w:W:z:Z?")) != -1) {
         switch (ch) {
             case 'A':
                 DURATION_ALLOPATRY = atoi(optarg);
-                break;
-            case 'b':
-                SITE_TYPE_BENEFICIAL = atoi(optarg);
-                break;
-            case 'B' :
-                SITE_TYPE_BG = atoi(optarg);
-                break;
-            case 'c' :
-                SITE_TYPE_DIVERGENT = atoi(optarg);
                 break;
             case 'C':
                 CUTOFF = strtod(optarg, (char**)NULL);
@@ -251,38 +231,37 @@ int main(int argc, char *argv[])
                 exit(-1);
         }
     }
-
+    
     int *demeIndexes;
     demeIndexes = (int *) malloc( (sizeof(int) * TOTAL_N * nDEMES));
-
+    
     // set up
     RNGsetup();
     initializePopulation();
     openDataRecordingFiles();
-    buildFitnessArray();
-
-
-
+    
+    
+    
     // main operations
     for ( t = 1; t <= TOTAL_GENERATIONS; t++ ) {
-
+        
         if ( t > DURATION_ALLOPATRY )
             migration( demeIndexes );
-
+        
         reproduction( demeIndexes );
-
+        
         calculateMetricsAndStats();
-
+        
         if ( MONITOR_PROGRESS ) {
             if ( t % MONITOR_PROGRESS == 0 )
                 fprintf(stdout, "%li\n", t);
         }
     }
-
-
+    
+    
     finalPrints();
-
-    // free blocks from m/alloc
+    
+    // free blocks from malloc
     free(genomeMap);
     free(genotypes);
     free(isVariableSite);
@@ -298,8 +277,7 @@ int main(int argc, char *argv[])
     free(mutationRateClass);
     free(alleleFrequencies);
     free(selectionCoefficients);
-    free(siteTypes);
-
+    
     // close files
     fclose(mutationLog);
     fclose(alleleFrequenciesOverTime);
@@ -308,7 +286,7 @@ int main(int argc, char *argv[])
     fclose(DaOverTime);
     fclose(DxyOverTime);
     fclose(variableLociOverTime);
-
+    
     return 0;
 }
 
@@ -316,22 +294,22 @@ int main(int argc, char *argv[])
 short int addAnewMutation(int locus, short int parentalAllele)
 {
     short int newAllele;
-
+    
     isVariableSite[locus] = 1;
     fixedAllele[locus] = -1;
-
+    
     if ( parentalAllele )
         newAllele = 0;
     else
         newAllele = 1;
-
-    /*if ( MODEL_TYPE == MODEL_TYPE_SELECTION ) {
+    
+    if ( MODEL_TYPE == MODEL_TYPE_SELECTION ) {
         fprintf(stderr, "\nError in addAnewMutation(): routine for adding selected mutations not yet built!\n");
         exit(-1);
-    }*/
-
+    }
+    
     fprintf(mutationLog, "%li,%i,%i,%i,%i\n", t, locus, newAllele, regionMembership[locus], mutationRateClass[locus]);
-
+    
     return newAllele;
 }
 
@@ -341,19 +319,19 @@ double boxMuller(double mu, double sd)
 {
     //  /* boxmuller.c           Implements the Polar form of the Box-Muller
     /*Transformation
-
+     
      (c) Copyright 1994, Everett F. Carter Jr.
      Permission is granted by the author to use
      this software for any application provided this
      copyright notice is preserved.
      [ smf's note: accessed online 12.03.06 at
      http:www.taygeta.com/random/boxmuller.html ]*/
-
-
+    
+    
     double x1, x2, w, y1;
     static double y2;
     static int use_last = 0;
-
+    
     if (use_last)		        /* use value from previous call */
     {
         y1 = y2;
@@ -366,62 +344,56 @@ double boxMuller(double mu, double sd)
             x2 = 2.0 * ( randU() ) - 1.0;
             w = x1 * x1 + x2 * x2;
         } while ( w >= 1.0 );
-
+        
         w = sqrt( (-2.0 * log( w ) ) / w );
         y1 = x1 * w;
         y2 = x2 * w;
         use_last = 1;
     }
-
+    
     return ( mu + y1 * sd );
 }
 
 
-void buildFitnessArray()
+void buildFitnessArray(int *demeIndexesStart, int deme, int numInDeme )
 {
     double siteTypeProbabilities[3], dum;
     int i;
     selectionCoefficients = (double *) malloc( (sizeof(double)*totalSitesInGenome));
-    siteTypes = (int *) malloc( (sizeof(double)*totalSitesInGenome));
-
 
     siteTypeProbabilities[0] = PROB_MUT_BENEFICIAL;
     siteTypeProbabilities[1] = siteTypeProbabilities[0] + PROB_MUT_BG;
     siteTypeProbabilities[2] = siteTypeProbabilities[1] + PROB_MUT_DIVERGENT;
-
+    
     // make a check to see if the cumulative probabilites exceed 1
-
+    
     if (siteTypeProbabilities[0]+siteTypeProbabilities[1]+siteTypeProbabilities[2] > 1){
         printf("error: cumulative site type probabilities exceed 1! (buildFitnessArray, line 372)");
         exit(1);
     }
-
+    
     // choose which sites are under selection
+    if (initializer == 0){
         for ( i = 0; i < totalSitesInGenome; i++ ) {
             dum = randU();
             if ( dum < siteTypeProbabilities[0] ) {
                 // for a selected site i
                 // do once, at beginning of simulation
                 selectionCoefficients[i] = log( 1.0 - randU() ) * -MEAN_S_BENEFICIAL;
-                siteTypes[i] = SITE_TYPE_BENEFICIAL;
             }
             else if ( dum < siteTypeProbabilities[1] ){
                 selectionCoefficients[i] = log( 1.0 - randU() ) * MEAN_S_BG;
-                siteTypes[i] = SITE_TYPE_BG;
             }
             else if ( dum < siteTypeProbabilities[2] ) {
                 selectionCoefficients[i] = log( 1.0 - randU() ) * -MEAN_S_DIVERGENT;
-                siteTypes[i] = SITE_TYPE_DIVERGENT;
             }
             else {
                 selectionCoefficients[i] = 0.0;
-                siteTypes[i] = 0;
             }
-
+            initializer++;
         }
-
+    }
 }
-
 void calculateMetricsAndStats(void)
 {
     int i, j, k, locus, n, deme, alleleSum, numVariableInWindow;
@@ -431,21 +403,21 @@ void calculateMetricsAndStats(void)
     double pitotal, piwithin, n1frac, n2frac;
     int totalAlleleCount, demeAlleleCount;
     _Bool atLeastOneVariable;
-
+    
     dpt1 = alleleFrequencies;
     ninv = 1.0 / ((double) (2 * TOTAL_N));
     kbinv = 1.0 / ((double) nSITES_PER_WINDOW);
-
+    
     // allele frequencies and by deme:
     for ( i = 0; i < totalSitesInGenome; i++ ) {
         // go sites 1 by 1
         dpt2 = alleleFrequenciesByDeme + i;  // pointer to allele frequency for site i in deme 0
-
+        
         if ( isVariableSite[i] ) { // if is variable site in population
-
+            
             gtpt = genotypes + (2 * i); // pointer to first allele of this site in first individual
             totalAlleleCount = 0;
-
+            
             for ( deme = 0; deme < nDEMES; deme++ ) {
                 demeAlleleCount = 0;
                 n = demeCounts[deme];
@@ -455,11 +427,11 @@ void calculateMetricsAndStats(void)
                     demeAlleleCount += alleleSum;
                     gtpt += 2 * totalSitesInGenome;
                 }
-
+                
                 *dpt2 = ((double) demeAlleleCount) / ((double) (2 * n)); // 2 for diploid
                 dpt2 += totalSitesInGenome;
             }
-
+            
             if ( totalAlleleCount == 2 * TOTAL_N ) { // 2 for diploid
                 isVariableSite[i] = 0;
                 fixedAllele[i] = 1;
@@ -474,31 +446,31 @@ void calculateMetricsAndStats(void)
             }
             else
                 *dpt1 = ((double) totalAlleleCount) * ninv;
-
+            
         }
         else {
             if ( fixedAllele[i] )
                 dum = 1.0;
             else
                 dum = 0.0;
-
+            
             *dpt1 = dum;
             for ( j = 0; j < nDEMES; j++ ) {
                 *dpt2 = dum;
                 dpt2 += totalSitesInGenome;
             }
         }
-
+        
         dpt1++;
     }
-
+    
     if ( t % TS_SAMP_FREQ == 0 ) {
-
+        
         if ( nDEMES > 2 ) {
             fprintf(stderr, "\nError in calculateMetricsAndStats(): methods assume only two demes!\n");
             exit(-1);
         }
-
+        
         fprintf(alleleFrequenciesOverTime, "%li", t);
         for ( i = 0; i < totalSitesInGenome; i++ ) {
             fprintf(alleleFrequenciesOverTime, ",%E", alleleFrequencies[i]);
@@ -511,22 +483,22 @@ void calculateMetricsAndStats(void)
             }
         }
         fprintf(alleleFrequenciesOverTime,"\n");
-
-
+        
+        
         // Dxy, pi, Da
         fprintf(piOverTime, "%li", t);
         fprintf(DxyOverTime, "%li", t);
         fprintf(DaOverTime, "%li", t);
         fprintf(FSToverTime, "%li", t);
-
+        
         dpt1 = alleleFrequenciesByDeme; // deme 1
         dpt2 = alleleFrequenciesByDeme + totalSitesInGenome; // deme 2
         dpt3 = alleleFrequencies; // global
         locus = 0;
-
+        
         n1frac = ((double) demeCounts[0]) / ((double) TOTAL_N);
         n2frac = ((double) demeCounts[1]) / ((double) TOTAL_N);
-
+        
         for ( i = 0; i < nGENOMIC_REGIONS; i++ ) {
             for ( j = 0; j < nWINDOWS_PER_REGION; j++ ) {
                 pi = 0.0;
@@ -540,21 +512,21 @@ void calculateMetricsAndStats(void)
                         p1 = *dpt1;
                         p2 = *dpt2;
                         pg = *dpt3;
-
+                        
                         // pi metric
                         pi += (p1 * (1.0 - p1)) + (p2 * (1.0 - p2));
-
+                        
                         // Dxy
                         Dxy += (p1 * (1.0 - p2)) + (p2 * (1.0 - p1));
-
+                        
                         // FST
                         piwithin += (n1frac * (p1 * (1.0 - p1))) + (n2frac * (p2 * (1.0 - p2)));
                         pitotal += pg * (1.0 - pg);
-
+                        
                         if ( piwithin > pitotal ) {
                             fprintf(stderr, "\nWarning: piwithin = %E > pitotal = %E\n\t p1 = %E, p2 = %E, pg = %E\n", piwithin, pitotal, p1, p2, pg);
                         }
-
+                        
                     }
                     dpt1++;
                     dpt2++;
@@ -563,12 +535,12 @@ void calculateMetricsAndStats(void)
                 }
                 pi *= kbinv;
                 fprintf(piOverTime, ",%E", pi);
-
+                
                 Dxy *= kbinv;
                 fprintf(DxyOverTime, ",%E", Dxy);
-
+                
                 fprintf(DaOverTime, ",%E", (Dxy - pi));
-
+                
                 if ( atLeastOneVariable ) {
                     FST = (pitotal - piwithin)/pitotal;
                     if ( FST < 0.0 ) {
@@ -579,21 +551,21 @@ void calculateMetricsAndStats(void)
                 else {
                     fprintf(FSToverTime, ",NA");
                 }
-
+                
             }
         }
         fprintf(piOverTime, "\n");
         fprintf(DxyOverTime, "\n");
         fprintf(DaOverTime, "\n");
         fprintf(FSToverTime, "\n");
-
+        
         i = 0;
         for ( locus = 0; locus < totalSitesInGenome; locus++ ) {
             if ( isVariableSite[locus] )
                 i++;
         }
         fprintf(variableLociOverTime, "%li,%i", t, i);
-
+        
         locus = 0;
         for ( i = 0; i < nGENOMIC_REGIONS; i++ ) {
             for ( j = 0; j < nWINDOWS_PER_REGION; j++ ) {
@@ -607,23 +579,23 @@ void calculateMetricsAndStats(void)
             }
         }
         fprintf(variableLociOverTime, "\n");
-
+        
     }
-
-
+    
+    
 }
 
 
 void finalPrints(void)
 {
     FILE *paramPrints;
-
+    
     paramPrints = fopen("parameters.m", "w");
-
+    
     fprintf(paramPrints, "codeVersion = '%s';\n", version);
-
-
-
+    
+    
+    
     fprintf(paramPrints, "nDEMES = %i;\nTOTAL_N = %i;\nTOTAL_GENERATIONS = %li;\n", nDEMES, TOTAL_N, TOTAL_GENERATIONS);
     fprintf(paramPrints, "nGENOMIC_REGIONS = %i;\nnWINDOWS_PER_REGION = %i;\nWINDOW_SIZE_BASES = %i;\n", nGENOMIC_REGIONS, nWINDOWS_PER_REGION, WINDOW_SIZE_BASES);
     fprintf(paramPrints, "nSITES_PER_WINDOW = %i;\nMIGRATION_RATE = %E;\nMEAN_S_BG = %E;\n", nSITES_PER_WINDOW, MIGRATION_RATE, MEAN_S_BG);
@@ -632,11 +604,11 @@ void finalPrints(void)
     fprintf(paramPrints, "MU_LOW = %E;\nDURATION_ALLOPATRY = %i;\nDETERMINISTIC = %i;\n", MU_LOW, DURATION_ALLOPATRY, DETERMINISTIC);
     fprintf(paramPrints, "HIGH_RECOMB_PROB_PER_KB = %E;\nLOW_RECOMB_PROB_PER_KB = %E;\nINITIAL_CONDITION = %i;\nTS_SAMP_FREQ = %i;\n", HIGH_RECOMB_PROB_PER_KB, LOW_RECOMB_PROB_PER_KB, INITIAL_CONDITION, TS_SAMP_FREQ);
     fprintf(paramPrints, "MODEL_TYPE = %i;\ntotalSitesInGenome = %i;\n", MODEL_TYPE, totalSitesInGenome);
-
-
-
+    
+    
+    
     fclose(paramPrints);
-
+    
 }
 
 
@@ -647,22 +619,22 @@ void initializePopulation(void)
     short int *sipt;
     double highMapDistanceBetweenLoci, lowMapDistanceBetweenLoci, *dpt1, *dpt2;
     FILE *printMap;
-
+    
     // set up genomic map
     totalSitesInGenome = nSITES_PER_WINDOW * nGENOMIC_REGIONS * nWINDOWS_PER_REGION;
     sitesPerRegion = nSITES_PER_WINDOW * nWINDOWS_PER_REGION;
-
+    
     highMapDistanceBetweenLoci = ((double) WINDOW_SIZE_BASES) * ((HIGH_RECOMB_PROB_PER_KB / 1000.0) * 100.0) / ((double) nSITES_PER_WINDOW);
     lowMapDistanceBetweenLoci = ((double) WINDOW_SIZE_BASES) * ((LOW_RECOMB_PROB_PER_KB / 1000.0) * 100.0) / ((double) nSITES_PER_WINDOW);
     genomeMap = (double *) malloc( (sizeof(double) * totalSitesInGenome) );
     genomeMap[0] = 0.0;
-
+    
     regionFlags = (int *) malloc( (sizeof(int) * totalSitesInGenome) );
     windowFlags = (int *) malloc( (sizeof(int) * totalSitesInGenome) );
     regionMembership = (int *) malloc( (sizeof(int) * totalSitesInGenome) );
     windowMembership = (int *) malloc( (sizeof(int) * totalSitesInGenome) );
     mutationRateClass = (int *) malloc( (sizeof(int) * totalSitesInGenome) );
-
+    
     currentRegion = 0;
     currentWindow = 0;
     for ( i = 0; i < totalSitesInGenome; i++ ) {
@@ -674,7 +646,7 @@ void initializePopulation(void)
         }
         else
             regionFlags[i] = REGION_FLAG_MIDDLE;
-
+        
         if ( ((i + 1) % nSITES_PER_WINDOW) == 1 ) {
             windowFlags[i] = WINDOW_FLAG_START;
         }
@@ -683,17 +655,17 @@ void initializePopulation(void)
         }
         else
             windowFlags[i] = WINDOW_FLAG_MIDDLE;
-
+        
         if ( (i > 0) && (i % nSITES_PER_WINDOW == 0) )
             currentWindow++;
-
+        
         windowMembership[i] = currentWindow;
-
+        
         if ( (i > 0) && (i % sitesPerRegion == 0) )
             currentRegion++;
-
+        
         regionMembership[i] = currentRegion;
-
+        
         if ( (currentRegion % 2) == 1 ) {
             mutationRateClass[i] = HIGH_MUT_FLAG;
             if ( i > 0 )
@@ -704,16 +676,16 @@ void initializePopulation(void)
             if ( i > 0 )
                 genomeMap[i] = genomeMap[(i-1)] + lowMapDistanceBetweenLoci;
         }
-
-
+        
+        
     }
-
+    
     printMap = fopen("genomeDetails.m","w");
     fprintf(printMap, "genomeMap = [");
     for ( i = 0; i < totalSitesInGenome; i++ )
         fprintf(printMap, "%f ", genomeMap[i]);
     fprintf(printMap, "];\n\n");
-
+    
     fprintf(printMap, "regionMembership = [");
     for ( i = 0; i < totalSitesInGenome; i++ ) {
         fprintf(printMap, "%i ", regionMembership[i]);
@@ -723,7 +695,7 @@ void initializePopulation(void)
         fprintf(printMap, "%i ", windowMembership[i]);
     }
     fprintf(printMap, "];\n\n");
-
+    
     fprintf(printMap, "regionFlags = [");
     for ( i = 0; i < totalSitesInGenome; i++ ) {
         fprintf(printMap, "%i ", regionFlags[i]);
@@ -733,20 +705,20 @@ void initializePopulation(void)
         fprintf(printMap, "%i ", windowFlags[i]);
     }
     fprintf(printMap, "];\n");
-
-
+    
+    
     fclose(printMap);
     //exit(0);
-
+    
     // set up genotypes
     genotypes = (short int *) malloc( (sizeof(short int) * 2 * TOTAL_N * totalSitesInGenome ) ); // 2 for diploidy
     isVariableSite = (int *) malloc ( (sizeof(int) * totalSitesInGenome) );
     fixedAllele = (short int *) malloc ( (sizeof(short int) * totalSitesInGenome) );
     alleleFrequenciesByDeme = (double *) malloc ( (sizeof(double) * totalSitesInGenome * nDEMES) );
     alleleFrequencies = (double *) malloc ( (sizeof(double) * totalSitesInGenome) );
-    alleleSelectionCoeffs = (double *) malloc ( (sizeof(double) * totalSitesInGenome * 4) ); // two alleles, and separate effects in each deme
+    //alleleSelectionCoeffs = (double *) malloc ( (sizeof(double) * totalSitesInGenome * 4) ); // two alleles, and separate effects in each deme
     demeLocations = (int *) malloc ( (sizeof(int) * TOTAL_N) );
-
+    
     // genotype setup depends upon choices about initial conditions
     sipt = genotypes;
     dpt1 = alleleFrequenciesByDeme;
@@ -772,8 +744,8 @@ void initializePopulation(void)
                 sipt++;
             }
         }
-
-
+        
+        
         // set up deme locations
         nPerDeme = TOTAL_N / nDEMES;
         j = 0;
@@ -782,7 +754,7 @@ void initializePopulation(void)
             j += nPerDeme;
         }
         demeCounts[(nDEMES-1)] = TOTAL_N - j;
-
+        
         count = 0;
         for ( i = 0; i < nDEMES; i++ ) {
             for ( j = 0; j < demeCounts[i]; j++ ) {
@@ -794,7 +766,7 @@ void initializePopulation(void)
             fprintf(stderr, "\nError in initializePopulation(): deme count (= %i) != TOTAL_N (= %i)\n", count, TOTAL_N);
             exit(-1);
         }
-
+        
     }
     else if ( INITIAL_CONDITION == INIT_NEUTRAL_STANDING_HWE ) {
         fprintf(stderr, "\nError in initializePopulation() !\n Procedures for INIT_NEUTRAL_STANDING_HWE undefined!\n");
@@ -804,7 +776,7 @@ void initializePopulation(void)
         fprintf(stderr, "\nError in initializePopulation() !\n INITIAL_CONDITION = %i undefined!\n", INITIAL_CONDITION);
         exit(-1);
     }
-
+    
 }
 
 
@@ -816,26 +788,26 @@ void makeOffspring(int momi, int dadi, short int *offspringGTpt)
     static long int highMutCountdown = -1;
     static long int lowMutCountdown = -1;
     _Bool addMutation;
-
+    
     if ( highMutCountdown == -1 ) // initialization flag
         highMutCountdown = (long int) ( (log(1.0 - randU())) * (-1.0/MU_HIGH) );
     if ( lowMutCountdown == -1 )  // initialization flag
         lowMutCountdown = (long int) ( (log(1.0 - randU())) * (-1.0/MU_LOW) );
-
-
+    
+    
     for ( i = 0; i < 2; i++ ) { // 2 is for two parents
-
+        
         // set offspring genotype pointer to right spot
         sipt = offspringGTpt + i;
-
+        
         // get the right parent index
         if ( i == 0 )
             parent = momi;
         else
             parent = dadi;
-
+        
         parentpt = genotypes + (2 * parent * totalSitesInGenome);
-
+        
         csome = 0; // which haplotype is used from the parent
         for ( j = 0; j < totalSitesInGenome; j++ ) {
             if ( regionFlags[j] == REGION_FLAG_START ) {
@@ -844,7 +816,7 @@ void makeOffspring(int momi, int dadi, short int *offspringGTpt)
                     csome = 1;
                 else
                     csome = 0;
-
+                
                 // next crossover
                 nextCrossover = genomeMap[j] + (log(1.0 - randU())) * (-50.0); // crossovers are i.i.d. with a mean of 50 cM between them
             }
@@ -856,13 +828,13 @@ void makeOffspring(int momi, int dadi, short int *offspringGTpt)
                             csome = 0;
                         else
                             csome = 1;
-
+                        
                         nextCrossover += (log(1.0 - randU())) * (-50.0);
-
+                        
                     } while ( genomeMap[j] > nextCrossover );
                 }
             }
-
+            
             addMutation = 0;
             if ( mutationRateClass[j] == HIGH_MUT_FLAG ) {
                 if ( highMutCountdown < 1 ) {
@@ -880,22 +852,22 @@ void makeOffspring(int momi, int dadi, short int *offspringGTpt)
                 else
                     lowMutCountdown--;
             }
-
+            
             // now, we know which chromosome to use, and if we need to add a mutation or not!
             newAllele = *(parentpt + csome); // get allele from parent
-
+            
             if ( addMutation )
                 newAllele = addAnewMutation(j, newAllele); // actuate mutation and update globals accordingly
-
+            
             *sipt = newAllele; // put allele in offspring's genome
-
+            
             sipt += 2;
             parentpt += 2;
-
+            
         }
     }
-
-
+    
+    
 }
 
 
@@ -903,15 +875,15 @@ void migration(int *demeIndexes)
 {
     int i, j, nmig = 0;
     FILE *finalLocations;
-
+    
     for ( i = 0; i < nDEMES; i++ )
         demeCounts[i] = 0;
-
+    
     if ( nDEMES != 2 ) {
         fprintf(stderr, "\nError in migration()!  Not set up for more than 2 demes!\n");
         exit(-1);
     }
-
+    
     for ( i = 0; i < TOTAL_N; i++ ) {
         if ( randU() < MIGRATION_RATE ) {
             nmig++;
@@ -929,30 +901,30 @@ void migration(int *demeIndexes)
             demeCounts[0] = demeCounts[0] + 1;
         }
     }
-
+    
     if ( (demeCounts[0] + demeCounts[1]) != TOTAL_N ) {
         fprintf(stderr, "\nError in migration()!  Counts don't add up!\n");
         exit(-1);
     }
-
+    
     if ( t == TOTAL_GENERATIONS ) {
-
+        
         finalLocations = fopen("finalLocations.m", "w");
-
+        
         //fprintf(stderr, "\nmig count = %i, demeCounts[0] = %i, demeCounts[1] = %i\n", nmig, demeCounts[0], demeCounts[1]);
         // array of counts of individuals in each deme
         fprintf(finalLocations, "demeCounts = [");
         for (i = 0; i < nDEMES; i++ )
             fprintf(finalLocations, "%i ", demeCounts[i]);
         fprintf(finalLocations, "];\n");
-
+        
         // array of deme location of each individual:
         fprintf(finalLocations, "demeLocations = [");
         for (i = 0; i < TOTAL_N; i++ )
             fprintf(finalLocations, "%i ", demeLocations[i]);
         fprintf(finalLocations, "];\n");
-
-
+        
+        
         // arrays of indexes of individuals in each deme
         for ( i = 0; i < nDEMES; i++ ) {
             fprintf(finalLocations, "deme%iindexes = [", i);
@@ -962,7 +934,7 @@ void migration(int *demeIndexes)
         }
         fclose(finalLocations);
     }
-
+    
 }
 
 
@@ -970,15 +942,15 @@ void migration(int *demeIndexes)
 void openDataRecordingFiles(void)
 {
     int i, j, locus;
-
+    
     // mutation log:
     mutationLog = fopen("MutationLog.csv", "w");
     fprintf(mutationLog, "Time,Locus,NewAllele,RegionMembership,MutationRateClass\n");
-
+    
     // fixation log:
     fixationLog = fopen("FixationLog.csv", "w");
     fprintf(mutationLog, "Time,Locus,FixedAllele,RegionMembership\n");
-
+    
     // allele freq's over time:
     alleleFrequenciesOverTime = fopen("AlleleFreqTimeSeries.csv", "w");
     fprintf(alleleFrequenciesOverTime, "Time");
@@ -991,18 +963,18 @@ void openDataRecordingFiles(void)
         }
     }
     fprintf(alleleFrequenciesOverTime, "\n");
-
+    
     // pi values over time: windows
     piOverTime = fopen("PiOverTime.csv", "w");
     DxyOverTime = fopen("DxyOverTime.csv", "w");
     DaOverTime = fopen("DaOverTime.csv", "w");
     FSToverTime = fopen("FSToverTime.csv", "w");
-
+    
     fprintf(piOverTime, "Time");
     fprintf(DxyOverTime, "Time");
     fprintf(DaOverTime, "Time");
     fprintf(FSToverTime, "Time");
-
+    
     for ( i = 0; i < nGENOMIC_REGIONS; i++ ) {
         for ( j = 0; j < nWINDOWS_PER_REGION; j++ ) {
             fprintf(piOverTime, ",Region%iWindow%i", i, j);
@@ -1015,7 +987,7 @@ void openDataRecordingFiles(void)
     fprintf(DxyOverTime, "\n");
     fprintf(DaOverTime, "\n");
     fprintf(FSToverTime, "\n");
-
+    
     variableLociOverTime = fopen("VariableSitesOverTime.csv", "w");
     fprintf(variableLociOverTime, "time,totalVariable");
     for ( i = 0; i < nGENOMIC_REGIONS; i++ ) {
@@ -1024,37 +996,86 @@ void openDataRecordingFiles(void)
         }
     }
     fprintf(variableLociOverTime, "\n");
-
+    
 }
 
 
-// change function so that you are passing in pointer to array of aliveOnes and the number alive
-int pickParent(double* selectionCoefficients, int prevChosen, int numAliveHere, int* aliveOnes)
+
+int pickParent(double* selectionCoefficients, int prevChosen, int nInDeme )
 {
     int i, j, n, count, dadi, momi, *ipt;
+    int aliveOnes[nInDeme], nAlive=0;
+    //double fitnessArray[TOTAL_N];
     short int *offspringGenotyes, *sipt;
     int *offspringDemeLocations;
-
+    offspringGenotyes = (short int *) malloc( (sizeof(short int) * 2 * totalSitesInGenome * TOTAL_N) );
+    offspringDemeLocations = (int *) malloc( (sizeof(int) * TOTAL_N) );
+    
     //	momi = *(ipt + momi); // extract the right index from the overall index array; "momi" and "dadi" are "local" indexes in the consecutive fitness array
     //        dadi = *(ipt + dadi);
-
+    
+    sipt = offspringGenotyes;
+    
     int luckyOne;
     if ( MODEL_TYPE == MODEL_TYPE_NEUTRAL_ONLY ) {
         do {
-            luckyOne = randI() % numAliveHere;
+            luckyOne = randI() % nInDeme;
         } while ( luckyOne == prevChosen );
     }
-    else if ( MODEL_TYPE == MODEL_TYPE_SELECTION ){
-
-    do  {
-        luckyOne = randI() % numAliveHere;
-    } while (luckyOne == prevChosen);
-
+    else if ( MODEL_TYPE == MODEL_TYPE_SELECTION ) {
+        //fprintf(stderr, "\nError in pickParent()! Procedures not in place for MODEL_TYPE_SELECTION\n");
+        //exit(-1);
+        
+        int s_total=0;
+        int s_sum;
+        int individual=0;
+        int i=0, j=0;
+        double viabilityArray[nInDeme];
+        for (i = 0; i<nSITES_PER_WINDOW; i++){
+            s_sum += selectionCoefficients[i];
+        }
+        
+        for(individual = 0; individual < nInDeme; individual++){
+            s_total=0, i=0;
+            for (j = 0; j<nSITES_PER_WINDOW; j++)
+            {
+                for (i=0;i<2;i++){
+                    if (*sipt == 1){
+                        s_total += selectionCoefficients[j];
+                    }
+                    sipt++;
+                }
+            } //builds individual selection total for comparison to overall total
+            viabilityArray[individual]=s_total;
+            
+        }
+        cutoff = Cutoff(viabilityArray);
+        int tracker;
+        
+        for (i=0; i<nInDeme; i++){
+            if (viabilityArray[i]>cutoff){
+                aliveOnes[tracker] = i;
+                tracker++;
+            } //Scans through to find values less than cutoff; make 0 or 1 in living ones array instead?
+        }
+        
+        
+        
+        luckyOne = randI() % tracker; //not nInDeme! Choose from array of live/dead
+        //aliveTracker currently has nInDeme elements; is the current modulus operation OK??
     }
-    return luckyOne;
+    
+    return aliveOnes[luckyOne];
 }
 
-
+double Cutoff(double* viabilityArray){
+    double cutoffArray[nInDeme];
+    memcpy(cutoffArray, viabilityArray, sizeof(double));
+    qsort(cutoffArray, nInDeme, sizeof(double), compare);
+    int deadMarker = CUTOFF*nInDeme, j=0;
+    //exit(1);
+    return cutoffArray[deadMarker];
+}
 
 int compare(const void *p, const void *q)
 {
@@ -1062,14 +1083,14 @@ int compare(const void *p, const void *q)
     int ret;
     int x = *(const int *)p;
     int y = *(const int *)q;
-
+    
     if (x == y)
         ret = 0;
     else if (x < y)
         ret = -1;
     else
         ret = 1;
-
+    
     return ret;
 }
 
@@ -1082,10 +1103,10 @@ long int Poisson(double mm)
      * accessed 4/12/12
      * ==================================================
      */
-
+    
     double tt = 0.0;
    long int events = 0;
-
+    
     while (tt < mm) {  // cumulative "time" between events; mm is the expected events per unit of time
         tt += -(log(1.0 - randU())); /* adding an amount of "time" from a random exponential draw with mean 1.0 unit
                                       hence, this winds up treating mm as the expected number of units of time to achieve
@@ -1093,7 +1114,7 @@ long int Poisson(double mm)
                                       events that occurred in mm units of time + 1. x counts the number of increments. s*/
         events++;  // one more "event"
     }
-
+    
     return (events-1); // corrects for counting one past the last "event" in the while loop
 }
 
@@ -1105,45 +1126,37 @@ long int Poisson(double mm)
 void reproduction(int *demeIndexes)
 {
     int i, j, n, count, dadi, momi, *ipt;
-    short int *offspringGenotyes, *offGTpt, *parentGTpt;
+    short int *offspringGenotyes, *sipt;
     int *offspringDemeLocations;
-    int aliveOnes[TOTAL_N], numAlive;
-
-    count = 0, initializer = 0;
-
+    
+    count = 0;
+    
     offspringGenotyes = (short int *) malloc( (sizeof(short int) * 2 * totalSitesInGenome * TOTAL_N) );
     offspringDemeLocations = (int *) malloc( (sizeof(int) * TOTAL_N) );
-
-
-    parentGTpt = genotypes;
-    offGTpt = offspringGenotyes;
+    
+    
+    sipt = offspringGenotyes;
     ipt = demeIndexes;
-
+    
     for ( i = 0; i < nDEMES; i++ ) {
-
+        
         n = demeCounts[i];
-
+        
         // set up fitness array for choosing parents
-        if ( MODEL_TYPE == MODEL_TYPE_SELECTION ){
-             numAlive =  viabilitySelection(&aliveOnes[0], n, selectionCoefficients, parentGTpt, i);
-          }
+        if ( MODEL_TYPE == MODEL_TYPE_SELECTION )
+            buildFitnessArray(ipt, i, n );// buildFitnessArray uses addres
         else if ( MODEL_TYPE != MODEL_TYPE_NEUTRAL_ONLY ) {
             fprintf(stderr, "\nError in reproduction()!  MODEL_TYPE (= %i) not recognized!\n", MODEL_TYPE);
             exit(-1);
         }
-        else{
-          numAlive = demeCounts[i];
-        }
-
+        
         // choose parents n times and make n offspring
         for ( j = 0; j < n; j++ ) {
-            // change to pass pickParent the array of alive ones and number alive
-            // also change the pickParent() function itself to use those passes properly
-            momi = pickParent( &selectionCoefficients[0], -1, numAlive, &aliveOnes[0] ); // -1 = flag for parent not chosen yet
-            dadi = pickParent( &selectionCoefficients[0], momi, numAlive, &aliveOnes[0] );
+            momi = pickParent( &selectionCoefficients[0], -1, n ); // -1 = flag for parent not chosen yet
+            dadi = pickParent( &selectionCoefficients[0], momi, n );
             momi = *(ipt + momi); // extract the right index from the overall index array; "momi" and "dadi" are "local" indexes in the consecutive fitness array
             dadi = *(ipt + dadi);
-
+            
             // /*  // test check:
             //            if ( demeLocations[momi] != i || demeLocations[dadi] != i ) {
             //                fprintf(stderr, "\nError in reproduction():\n\tLocations of parents not in right deme!\n\tdadi = %i, momi = %i\n", dadi, momi);
@@ -1151,30 +1164,28 @@ void reproduction(int *demeIndexes)
             //                exit(-1);
             //            }
             //            // */ // end test check
-
-            makeOffspring(momi, dadi, offGTpt);
-            offGTpt += 2 * totalSitesInGenome; // 2 for diploid; advance to next spot to start storing offspring genotype
-
+            
+            makeOffspring(momi, dadi, sipt);
+            sipt += 2 * totalSitesInGenome; // 2 for diploid; advance to next spot to start storing offspring genotype
+            
             offspringDemeLocations[count] = i;
             count++;
         }
-
-        parentGTpt += 2 * totalSitesInGenome * n;
-
+        
         ipt += TOTAL_N; // advance deme index pointer to next deme's set
     }
-
+    
     if ( count != TOTAL_N ) {
         fprintf(stderr, "\nError in reproduction()!  Made wrong number of offspring!\n\tcount (=%i) != TOTAL_N (= %i)\n", count, TOTAL_N);
         exit(-1);
     }
-
+    
     free(genotypes);
     genotypes = offspringGenotyes;
-
+    
     free(demeLocations);
     demeLocations = offspringDemeLocations;
-
+    
     //   // test check:
     //    count = 0;
     //    for ( i = 0; i < nDEMES; i++ ) {
@@ -1188,7 +1199,7 @@ void reproduction(int *demeIndexes)
     //        }
     //    }
     //  // end test check
-
+    
 }
 
 
@@ -1201,17 +1212,17 @@ void RNGsetup(void)
     long ltime;
     FILE *rseed;
     long int i;
-
-
-
+    
+    
+    
     if (DETERMINISTIC) {
-
+        
         fpt = fopen("RnumSeed.txt","r");
         if (fpt == NULL) {
             perror("Can't open RnumSeed.txt");
             exit(-1);
         }
-
+        
         rcount = fscanf(fpt,"%i",&seed);
         if ( rcount ) {
             seedRand(seed);	// fixed random number seed
@@ -1225,18 +1236,18 @@ void RNGsetup(void)
     }
     else {
         /* use calendar time to seed random number generator.  Code adopted from Schildt's textbook */
-
+        
         /* get the calendar time */
         ltime=time(NULL);
         stime=(unsigned) ltime/2;
-
+        
         // generate and store random number seed
         rseed = fopen("RnumSeed.txt","w");
         fprintf(rseed,"%i\n",stime);
         fclose(rseed);
         seedRand(stime);	// get random number seed (system time)
     }
-
+    
     // warm up
     for ( i = 0; i < 1000000; i++ )
         randU();
@@ -1248,11 +1259,11 @@ void RNGsetup(void)
 void usage(char *s)
 {
     fprintf(stderr,  "\nUsage: %s [options]\n\n", s); // info print
-
-
-
+    
+    
+    
     fprintf(stderr,  "\t[-?]\n\t\tPrint this list of options to screen and exit the program.\n\n");
-
+    
 }
 
 void useShortTestValuesOfParameters(void)
@@ -1274,135 +1285,3 @@ double* walker(double* dum, int index){
     return dum;
 }
 
-
-int viabilitySelection(int *aliveOnes, int n, double *selectionCoefficients, short int *sipt, int deme){
-  int s_total=0;
-    int s_sum;
-    int individual=0;
-    int i=0, j=0, genotype=0;
-    double viabilityArray[n];
-
-	for(individual = 0; individual < n; individual++){
-            s_total=1.0;
-            for (j = 0; j<totalSitesInGenome; j++)
-            {
-              for(i=0; i<2; i++){
-                genotype += *sipt;
-                sipt++;
-              }
-              s_total += Selection(&selectionCoefficients[0], j, deme, genotype);
-              genotype = 0;
-
-            } //builds individual selection total for comparison to overall total
-            viabilityArray[individual]=s_total;
-        }
-
-
-
-  double maximum = gsl_stats_max(&viabilityArray[0], 1, demeCounts[deme]);
-
-
-
-  for(j; j<n; j++){
-          viabilityArray[i] = viabilityArray[i]/maximum;
-  } //Normalize built fitness values to 1
-
-
-        int average = gsl_stats_mean(&viabilityArray[0], 1, n);
-        int kill_tracker=0, alive_tracker = 0, max_kill;
-        double cutoff, survival_prob;
-
-        max_kill = 0.1*n;
-
-	for (i=0; i<n; i++){
-      survival_prob = viabilityArray[i];
-      cutoff = CUTOFF;
-      if(survival_prob<cutoff && kill_tracker<max_kill){
-        kill_tracker++;
-      }
-      else {
-        aliveOnes[alive_tracker] = i;
-        alive_tracker++;
-           }
-      //Assigns living individual (i) to index tracker in aliveOnes array
-        }
-
-      if ( alive_tracker <= 0 ) {
-        fprintf(stderr, "\nWarning in viabilitySelection(): Everybody is dead!\n");
-        fprintf(stderr, "\tt = %li, deme = %i, demeCounts[deme] = %i, n = %i\n", t, deme, demeCounts[deme], n);
-        fprintf(stderr, "viabilityArray:\n");
-        for ( i = 0; i <n; i++ ) {
-          fprintf(stderr, "%f\t", viabilityArray[i]);
-        }
-        fprintf(stderr, "\n");
-      }
-  return alive_tracker;
-}
-
-
-double divCoeff(int locus, int deme, int genotype){
-  int sum = 0, i=0, j=0;
-
-  if (genotype == 0){
-    return ((nDEMES-1)-deme)/(nDEMES-1)*-2;
-  }
-  if (genotype == 1){
-    return 1;
-  }
-  if (genotype == 2){
-    return (deme/(nDEMES-1))*-2;
-  }
-  else{
-    fprintf(stderr, "\nError in divCoeff(): genotype values outside desired bounds!\n");
-    exit(-1);
-  }
-}
-
-double Selection(double* selectionCoefficients, int locus, int deme, int genotype){
-if (siteTypes[locus] == 0){
-  return 0;
-}
-
-if (genotype != 0 && genotype != 1 && genotype != 2){
-  fprintf(stderr, "\nError in Selection(): Genotype outside desired bounds!\n");
-  exit(-1);
-}
-
-if(siteTypes[locus] == SITE_TYPE_BENEFICIAL){
-  if (genotype == 0){
-    return selectionCoefficients[locus]/2;
-  }
-
-  if (genotype == 1){
-    return selectionCoefficients[locus];
-  }
-
-  if(genotype == 2){
-    return 2*selectionCoefficients[locus];
-  }
-}
-
-if(siteTypes[locus] == SITE_TYPE_BG){
-  if (genotype == 0){
-    return 0;
-  }
-
-  if (genotype == 1){
-    return -1*selectionCoefficients[locus];
-  }
-
-  if (genotype == 2){
-    return -2*selectionCoefficients[locus];
-  }
-}
-
-if(siteTypes[locus] == SITE_TYPE_DIVERGENT){
-  double div = divCoeff(locus, deme, genotype);
-  return div*selectionCoefficients[locus];
-}
-
-else {
-  fprintf(stderr, "\nError in Selection(): siteType[locus] recognition error\n");
-  exit(-1);
-}
-}

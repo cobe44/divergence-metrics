@@ -1,0 +1,15 @@
+M:
+	-M1 starts selection model
+
+p:
+	-p X gives prob_mut_beneficial value X
+
+P: 
+	-P X gives prob_mut_BG value X
+
+q: 
+	-q X gives prob_mut_divergent value X
+
+
+-In order to get cumulative site type probabilities to not exceed 1, prob_mut_beneficial cannot exceed 0.3333 due to additive nature of program setup.
+	If i want prob_mut_BG or prob_mut_divergent to have values of 0 for debugging purposes, would it screw things up to make them negative?

@@ -1,0 +1,138 @@
+/*
+ *
+ *  Created by Samuel Melvin Flaxman on 2/24/15.
+ *  Copyright 2015 Samuel Melvin Flaxman. All rights reserved.
+ *
+ */
+
+const char *version = "1.0.3";
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <unistd.h>
+#include <getopt.h>
+#include <time.h>
+#include <sys/time.h>
+#include <string.h>
+
+#include "MT/dSFMT.h"
+
+// code for using Mersenne Twister RNG
+dsfmt_t dsfmt;
+#define seedRand(s) dsfmt_init_gen_rand(&dsfmt, s)
+#define	randU() dsfmt_genrand_close_open(&dsfmt)
+#define	randI() (unsigned)dsfmt_genrand_uint32(&dsfmt)
+
+
+// parameters
+#define nDEMES 2
+#define TOTAL_N_DEFAULT 10000 // population size
+#define TOTAL_GENERATIONS_DEFAULT 10000 // total length of time to run
+#define nGENOMIC_REGIONS_DEFAULT 2 // number of large scale regions of potential divergence to simulate
+#define nWINDOWS_PER_REGION_DEFAULT 60 // number of windows in each genome
+#define WINDOW_SIZE_BASES_DEFAULT 20000 // window size in number of bases
+#define nSITES_PER_WINDOW_DEFAULT 20 // maximum number of polymorphic sites within a window
+#define MIGRATION_RATE_DEFAULT 0.05 // fraction of each deme migrating to other deme per generation
+#define MEAN_S_BG_DEFAULT 0.1 // selection coefficient mean against deleterious mutations ("background")
+#define MEAN_S_DIVERGENT_DEFAULT 0.01 // mean selection coefficient for divergently selected mutations
+#define MEAN_S_BENEFICIAL_DEFAUT 0.01 // mean selection coefficient for universally beneficial mutations
+#define PROB_MUT_BG_DEFAULT 0.0 // probability a new mutation is deleterious
+#define PROB_MUT_DIVERGENT_DEFAULT 0.0 // probability a new mutation is divergently selected
+#define PROB_MUT_BENEFICIAL_DEFAULT 0.0 // probability a new mutation is universally adaptive
+#define MU_HIGH_DEFAULT 1E-06 // "high" mutation rate per site per individual per meiosis
+#define MU_LOW_DEFAULT 1E-06 // "low" mutation rate per site per individual per meiosis
+#define DURATION_ALLOPATRY_DEFAULT 0 // number of generations of allopatry at beginning
+#define DETERMINISTIC_DEFAULT 1 // use RNG seed in file or not (Boolean)'
+#define HIGH_RECOMB_PROB_PER_KB_DEFAULT 0.001 // recombination probability per 1000 bases per meiosis
+#define LOW_RECOMB_PROB_PER_KB_DEFAULT 0.0001
+#define INITIAL_CONDITION_DEFAULT 0 // for setting up alleles and frequencies in initialization
+#define TS_SAMP_FREQ 1000
+#define CUTOFF_DEFAULT 0.3
+
+
+// useful flags
+#define ALLELE_TYPE_NEUTRAL 0
+#define ALLELE_TYPE_DIVERGENT 1
+#define ALLELE_TYPE_BG 2
+
+#define INIT_NO_INITIAL_DIVERGENCE 0
+#define INIT_NEUTRAL_STANDING_HWE 1
+
+#define MODEL_TYPE_NEUTRAL_ONLY 0
+#define MODEL_TYPE_SELECTION 1
+
+#define REGION_FLAG_START 1
+#define REGION_FLAG_END 2
+#define REGION_FLAG_MIDDLE 0
+
+#define WINDOW_FLAG_START 1
+#define WINDOW_FLAG_END 2
+#define WINDOW_FLAG_MIDDLE 0
+
+#define HIGH_MUT_FLAG 1
+#define LOW_MUT_FLAG 0
+
+
+// function declarations
+short int addAnewMutation(int locus, short int parentalAllele);
+double boxMuller(double mu, double sd);
+void buildFitnessArray(int *demeIndexesStart, int deme, int numInDeme );
+void calculateMetricsAndStats(void);
+void finalPrints(void);
+void initializePopulation(void);
+void makeOffspring(int momi, int dadi, short int *offspringGTpt);
+void migration(int *demeIndexes);
+void openDataRecordingFiles(void);
+int pickParent(double *selectionCoefficients, int prevChosen, int nInDeme );
+long int Poisson(double mm);
+void reproduction(int *demeIndexes);
+void RNGsetup(void);
+void usage(char *s);
+void useShortTestValuesOfParameters(void);
+int compare(const void *p, const void *q);
+double Cutoff(double* viabilityArray);
+double* walker(double* dum, int index);
+
+// global variables for command line options
+int TOTAL_N = TOTAL_N_DEFAULT;
+long int TOTAL_GENERATIONS = TOTAL_GENERATIONS_DEFAULT;
+int nGENOMIC_REGIONS = nGENOMIC_REGIONS_DEFAULT;
+int nWINDOWS_PER_REGION = nWINDOWS_PER_REGION_DEFAULT;
+int WINDOW_SIZE_BASES = WINDOW_SIZE_BASES_DEFAULT;
+int nSITES_PER_WINDOW = nSITES_PER_WINDOW_DEFAULT;
+double MIGRATION_RATE = MIGRATION_RATE_DEFAULT;
+double MEAN_S_BENEFICIAL = MEAN_S_BENEFICIAL_DEFAUT;
+double MEAN_S_BG = MEAN_S_BG_DEFAULT;
+double MEAN_S_DIVERGENT = MEAN_S_DIVERGENT_DEFAULT;
+double PROB_MUT_BENEFICIAL = PROB_MUT_BENEFICIAL_DEFAULT;
+double PROB_MUT_BG = PROB_MUT_BG_DEFAULT;
+double PROB_MUT_DIVERGENT = PROB_MUT_DIVERGENT_DEFAULT;
+double MU_HIGH = MU_HIGH_DEFAULT;
+double MU_LOW = MU_LOW_DEFAULT;
+int DURATION_ALLOPATRY = DURATION_ALLOPATRY_DEFAULT;
+int DETERMINISTIC = DETERMINISTIC_DEFAULT;
+double HIGH_RECOMB_PROB_PER_KB = HIGH_RECOMB_PROB_PER_KB_DEFAULT;
+double LOW_RECOMB_PROB_PER_KB = LOW_RECOMB_PROB_PER_KB_DEFAULT;
+int INITIAL_CONDITION = INITIAL_CONDITION_DEFAULT;
+int MODEL_TYPE = MODEL_TYPE_NEUTRAL_ONLY;
+int MONITOR_PROGRESS = 0;
+double CUTOFF = CUTOFF_DEFAULT;
+
+// other global variables
+int demeCounts[nDEMES];
+int totalSitesInGenome;
+int nInDeme;
+FILE *alleleFrequenciesOverTime, *mutationLog, *fixationLog, *piOverTime;
+FILE *DaOverTime, *DxyOverTime, *variableLociOverTime, *FSToverTime;
+long int t = 0;
+int initializer=0, cinitializer=0;
+double* selectionCoefficients;
+int cutoff;
+
+// global pointers for malloc() calls
+double *genomeMap;
+short int *genotypes;
+int *isVariableSite;
+short int *fixedAllele;
+double *alleleFrequenciesByDeme;

@@ -1,0 +1,30 @@
+From Reproduction move 
+    selectionCoefficients = (double *) malloc( (sizeof(double)*totalSitesInGenome));
+to buildFitnessArray;
+causing segfault?
+
+(Didn't fix it!)
+
+There's another variable called alleleSelectionCoeffs.
+
+Ask about line 435. dpt2 uses alleleSelectionCoeffs; know how this works before you remove it!!!!!!!
+
+
+-----------------------------------------------------
+
+
+Line 1275, viabilitySelection
+
+
+if (*sipt == 1){
+-Assume that alleles with 0 are not under selection?? 
+
+Change numAlive to global variable to allow for passing between functions?? Are there disadvantages to this approach?
+
+-------------------------------------------------
+
+
+Within buildFitnessArray:
+
+siteTypeProbabilities[3] has no data assigned because PROB_MUT_BENEFICIAL_DEFAULT = 0. All the rest of the mutation probabilities are 0 as well
+
