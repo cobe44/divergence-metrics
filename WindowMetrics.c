@@ -192,7 +192,7 @@ int main(int argc, char *argv[])
                 MIGRATION_RATE = strtod(optarg, (char **)NULL);
                 break;
             case 'M':
-                MODEL_TYPE = atoi(optarg);
+                  MODEL_TYPE = atoi(optarg);
                 break;
             case 'N':
                 TOTAL_N = atoi(optarg);
@@ -324,11 +324,6 @@ short int addAnewMutation(int locus, short int parentalAllele)
         newAllele = 0;
     else
         newAllele = 1;
-
-    /*if ( MODEL_TYPE == MODEL_TYPE_SELECTION ) {
-        fprintf(stderr, "\nError in addAnewMutation(): routine for adding selected mutations not yet built!\n");
-        exit(-1);
-    }*/
 
     fprintf(mutationLog, "%li,%i,%i,%i,%i\n", t, locus, newAllele, regionMembership[locus], mutationRateClass[locus]);
 
@@ -1308,7 +1303,6 @@ int viabilitySelection(int *aliveOnes, int n, double *selectionCoefficients, sho
   } //Normalize built fitness values to 1
 
 
-        int average = gsl_stats_mean(&viabilityArray[0], 1, n);
         int kill_tracker=0, alive_tracker = 0, max_kill;
         double cutoff, survival_prob;
 
