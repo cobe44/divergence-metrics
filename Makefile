@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 CCFLAGS = -g -L/usr/local/lib -ggdb3
+=======
+CCFLAGS = -O3
+>>>>>>> 1663426ed7155d27f7b1a805a3c33c1dab10ca4e
 TARGET = WindowMetrics
 
 #
@@ -12,7 +16,11 @@ CC = gcc
 # Rule for linking together the object files needed for our program
 #
 ${TARGET}: ${TARGET}.o MT/dSFMT.o
+<<<<<<< HEAD
 	${CC} ${CCFLAGS} -o $@ MT/dSFMT.o ${TARGET}.o -lm  -lgsl -lgslcblas
+=======
+	${CC} ${CCFLAGS} -o $@ MT/dSFMT.o ${TARGET}.o
+>>>>>>> 1663426ed7155d27f7b1a805a3c33c1dab10ca4e
 
 #
 # Rule for how the MT code gets build.  Just go to that directory and
